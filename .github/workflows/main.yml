@@ -64,7 +64,7 @@ jobs:
             --without-xinput2 \
             --enable-archs=i386,x86_64 \
             --disable-tests \
-            --with-mingw=llvm-mingw
+            --with-mingw=clang
           make -j"$(nproc)"
           make install DESTDIR="$GITHUB_WORKSPACE/stage"
 
