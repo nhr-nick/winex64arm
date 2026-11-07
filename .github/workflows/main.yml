@@ -93,12 +93,20 @@ jobs:
           find $S -name '*.la' -delete 2>/dev/null || true
           tar -cJf wine64-libs-focal-$(date +%Y%m%d).tar.xz -C $S usr
 
-      - name: 上传产物
+      - name: 上传 wine 本体
         uses: actions/upload-artifact@v4
         with:
           name: wine64-focal
-          path: wine64-*-focal-*.tar.xz
-          retention-days: 90
+          path: wine64-focal-*.tar.xz        # 注意：能且只能匹配 wine64-focal-日期.tar.xz
+          if-no-files-found: error
+
+      - name: 上传 focal 运行库
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine64-libs-focal
+          path: wine64-libs-focal-*.tar.xz
+          if-no-files-found: error
+
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
