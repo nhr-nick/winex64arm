@@ -9,32 +9,39 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:20.04          # ← 与设备 glibc 完全一致
+      image: ubuntu:20.04          # 与设备 glibc 2.31 完全一致
     steps:
-      - name: 配置 apt 源（保险）与构建依赖
+      - name: 配置 apt 源与构建依赖
         run: |
-          # focal 标准支持已过，必要时切到 old-releases（有则跳过报错即可）
-          sed -i 's|archive.ubuntu.com|old-releases.ubuntu.com|g; s|security.ubuntu.com|old-releases.ubuntu.com|g' /etc/apt/sources.list 2>/dev/null || true
-          apt-get update
+          # 先按正常 archive 源走，失败才切 old-releases
+          cat > /etc/apt/sources.list <<'EOF'
+          deb http://archive.ubuntu.com/ubuntu focal main universe
+          deb http://archive.ubuntu.com/ubuntu focal-updates main universe
+          deb http://archive.ubuntu.com/ubuntu focal-security main universe
+          EOF
+          if ! apt-get update; then
+            echo "archive 不可用，切换 old-releases"
+            sed -i 's|archive.ubuntu.com|old-releases.ubuntu.com|g; s|security.ubuntu.com|old-releases.ubuntu.com|g' \
+              /etc/apt/sources.list
+            apt-get update
+          fi
+
           env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates curl xz-utils git build-essential flex bison \
-            pkg-config file patch make gcc g++ \
+            pkg-config file patch make \
             libx11-dev libxext-dev libxrender-dev libxrandr-dev \
             libxcursor-dev libxinerama-dev libxcomposite-dev libxxf86vm-dev \
             libfreetype-dev libfontconfig-dev libgnutls28-dev \
             libgl-dev libegl-dev libvulkan-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libpulse-dev libasound2-dev libudev-dev libdbus-1-dev \
-            libusb-1.0-0-dev libunwind-dev liblcms2-dev libsdl2-dev \
-            samba-dev-dev 2>/dev/null || \
-          env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            libsamba-dev
+            libusb-1.0-0-dev libunwind-dev liblcms2-dev libsdl2-dev
 
       - name: 检出 Wine 源码
         uses: actions/checkout@v4
         with:
-          repository: wine-mirror/wine
-          ref: wine-11.0
+          repository: wine-mirror/wine   # 官方 GitHub 镜像；改源码则换成你的 fork
+          ref: wine-11.0                 # 以后升级只改这一行
 
       - name: 安装 llvm-mingw 工具链
         run: |
@@ -43,11 +50,9 @@ jobs:
             https://github.com/mstorsjo/llvm-mingw/releases/download/20250514/llvm-mingw-20250514-ucrt-ubuntu-20.04-x86_64.tar.xz
           tar -xf llvm-mingw.tar.xz
           mv llvm-mingw-*/ mingw64
-          export PATH=/opt/mingw64/bin:$PATH
-          echo 'export PATH=/opt/mingw64/bin:$PATH' >> /etc/profile.d/mingw.sh
-          # 验证
-          i686-w64-mingw32-gcc --version | head -1
-          x86_64-w64-mingw32-gcc --version | head -1
+          # 验证两个交叉编译器都可用
+          /opt/mingw64/bin/i686-w64-mingw32-clang --version | head -1
+          /opt/mingw64/bin/x86_64-w64-mingw32-clang --version | head -1
 
       - name: Configure & Build
         env:
@@ -59,7 +64,7 @@ jobs:
             --without-xinput2 \
             --enable-archs=i386,x86_64 \
             --disable-tests \
-            --with-mingw=llvm-mingw     # ← 关键：用 llvm-mingw 替代 apt 的 mingw 7.0
+            --with-mingw=llvm-mingw
           make -j"$(nproc)"
           make install DESTDIR="$GITHUB_WORKSPACE/stage"
 
@@ -69,22 +74,27 @@ jobs:
           find bin lib/wine/x86_64-unix -type f | while read -r f; do
             file "$f" | grep -q ELF && strip --strip-unneeded "$f" || true
           done
+          du -sh .
 
       - name: 打包 Wine
-        run: tar -cJf wine64-focal-$(date +%Y%m%d).tar.xz -C stage opt
+        run: |
+          tar -cJf wine64-focal-$(date +%Y%m%d).tar.xz -C stage opt
 
       - name: 打包 focal 版运行库
         run: |
           S=/tmp/wine-libs
-          mkdir -p $S
+          mkdir -p $S/usr/share
           cp -a /usr/lib64 $S/ 2>/dev/null || true
-          cp -a /usr/lib/x86_64-linux-gnu $S/
+          cp -a /usr/lib/x86_64-linux-gnu $S/usr/lib/x86_64-linux-gnu 2>/dev/null || \
+            { mkdir -p $S/usr/lib; cp -a /usr/lib/x86_64-linux-gnu $S/usr/lib/; }
           cp -a /usr/share/vulkan/icd.d $S/usr/share/ 2>/dev/null || true
-          rm -rf $S/usr/lib/x86_64-linux-gnu/{pkgconfig,cmake}
-          find $S -name '*.a' -delete; find $S -name '*.la' -delete
+          rm -rf $S/usr/lib/x86_64-linux-gnu/{pkgconfig,cmake} 2>/dev/null || true
+          find $S -name '*.a' -delete 2>/dev/null || true
+          find $S -name '*.la' -delete 2>/dev/null || true
           tar -cJf wine64-libs-focal-$(date +%Y%m%d).tar.xz -C $S usr
 
-      - uses: actions/upload-artifact@v4
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
         with:
           name: wine64-focal
           path: wine64-*-focal-*.tar.xz
