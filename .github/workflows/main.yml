@@ -1,0 +1,102 @@
+name: wine64-build-focal
+
+on:
+  workflow_dispatch:
+  push:
+    tags: [ 'wine-v*' ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04          # ← 与设备 glibc 完全一致
+    steps:
+      - name: 配置 apt 源（保险）与构建依赖
+        run: |
+          # focal 标准支持已过，必要时切到 old-releases（有则跳过报错即可）
+          sed -i 's|archive.ubuntu.com|old-releases.ubuntu.com|g; s|security.ubuntu.com|old-releases.ubuntu.com|g' /etc/apt/sources.list 2>/dev/null || true
+          apt-get update
+          env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl xz-utils git build-essential flex bison \
+            pkg-config file patch make gcc g++ \
+            libx11-dev libxext-dev libxrender-dev libxrandr-dev \
+            libxcursor-dev libxinerama-dev libxcomposite-dev libxxf86vm-dev \
+            libfreetype-dev libfontconfig-dev libgnutls28-dev \
+            libgl-dev libegl-dev libvulkan-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libpulse-dev libasound2-dev libudev-dev libdbus-1-dev \
+            libusb-1.0-0-dev libunwind-dev liblcms2-dev libsdl2-dev \
+            samba-dev-dev 2>/dev/null || \
+          env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            libsamba-dev
+
+      - name: 检出 Wine 源码
+        uses: actions/checkout@v4
+        with:
+          repository: wine-mirror/wine
+          ref: wine-11.0
+
+      - name: 安装 llvm-mingw 工具链
+        run: |
+          cd /opt
+          curl -L -o llvm-mingw.tar.xz \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20250514/llvm-mingw-20250514-ucrt-ubuntu-20.04-x86_64.tar.xz
+          tar -xf llvm-mingw.tar.xz
+          mv llvm-mingw-*/ mingw64
+          export PATH=/opt/mingw64/bin:$PATH
+          echo 'export PATH=/opt/mingw64/bin:$PATH' >> /etc/profile.d/mingw.sh
+          # 验证
+          i686-w64-mingw32-gcc --version | head -1
+          x86_64-w64-mingw32-gcc --version | head -1
+
+      - name: Configure & Build
+        env:
+          PATH: /opt/mingw64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        run: |
+          mkdir build && cd build
+          ../configure \
+            --prefix=/opt/wine64 \
+            --without-xinput2 \
+            --enable-archs=i386,x86_64 \
+            --disable-tests \
+            --with-mingw=llvm-mingw     # ← 关键：用 llvm-mingw 替代 apt 的 mingw 7.0
+          make -j"$(nproc)"
+          make install DESTDIR="$GITHUB_WORKSPACE/stage"
+
+      - name: 瘦身
+        run: |
+          cd "$GITHUB_WORKSPACE/stage/opt/wine64"
+          find bin lib/wine/x86_64-unix -type f | while read -r f; do
+            file "$f" | grep -q ELF && strip --strip-unneeded "$f" || true
+          done
+
+      - name: 打包 Wine
+        run: tar -cJf wine64-focal-$(date +%Y%m%d).tar.xz -C stage opt
+
+      - name: 打包 focal 版运行库
+        run: |
+          S=/tmp/wine-libs
+          mkdir -p $S
+          cp -a /usr/lib64 $S/ 2>/dev/null || true
+          cp -a /usr/lib/x86_64-linux-gnu $S/
+          cp -a /usr/share/vulkan/icd.d $S/usr/share/ 2>/dev/null || true
+          rm -rf $S/usr/lib/x86_64-linux-gnu/{pkgconfig,cmake}
+          find $S -name '*.a' -delete; find $S -name '*.la' -delete
+          tar -cJf wine64-libs-focal-$(date +%Y%m%d).tar.xz -C $S usr
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wine64-focal
+          path: wine64-*-focal-*.tar.xz
+          retention-days: 90
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: wine64-focal }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: wine64-*-focal-*.tar.xz
